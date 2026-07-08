@@ -478,25 +478,29 @@ def build_icl_commands(node: dict) -> list[str]:
       - session-synchronization  (recommended for stateful failover)
       - traceoptions             (for troubleshooting only)
     """
-    iface = node["icl_interface"]
-    icl_ip = node["icl_ip"]
+    iface    = node["icl_interface"]
+    icl_ip   = node["icl_ip"]
+    peer_id  = node["peer_id"]
+    # peer_icl_ip: the ICL IP of the OTHER node (no prefix) — used as peer-ip
+    peer_ip  = node["peer_icl_ip"]
+
     return [
-        # ── ICL physical interface (just a regular routed L3 interface) ───────
-        # No special chassis-level "icl-interface" declaration needed in MNHA.
-        # The ICL is identified by the peer reaching this IP over the direct link.
+        # ── ICL physical interface ────────────────────────────────────────────
         f"set interfaces {iface} description \"MNHA-ICL-to-peer\"",
         f"set interfaces {iface} unit 0 family inet address {icl_ip}",
 
-        # ── MNHA — required chassis parameters ───────────────────────────────
+        # ── MNHA chassis high-availability — required parameters ──────────────
+        # local-id: identifies this node in the HA pair
         f"set chassis high-availability local-id {node['local_id']}",
-        f"set chassis high-availability peer-id {node['peer_id']}",
 
-        # ── MNHA — optional parameters (uncomment to override Junos defaults) ─
-        # f"set chassis high-availability heartbeat-interval 1000",   # default: 1000 ms
-        # f"set chassis high-availability heartbeat-threshold 3",      # default: 3
-        # f"set chassis high-availability session-synchronization",    # stateful session sync
-        # f"set chassis high-availability traceoptions file ha-trace", # debug only
-        # f"set chassis high-availability traceoptions flag all",      # debug only
+        # peer-id block: mandatory sub-statements revealed by commit check:
+        #   peer-ip          → ICL IP of the peer node (reachable over ICL link)
+        #   interface        → local ICL interface used to reach the peer
+        #   liveness-detection → BFD settings for peer health monitoring
+        f"set chassis high-availability peer-id {peer_id} peer-ip {peer_ip}",
+        f"set chassis high-availability peer-id {peer_id} interface {iface}",
+        f"set chassis high-availability peer-id {peer_id} liveness-detection minimum-interval 1000",
+        f"set chassis high-availability peer-id {peer_id} liveness-detection multiplier 3",
     ]
 
 
@@ -629,6 +633,10 @@ def main() -> None:
 
     # Build node dicts (password prompted here if not passed via --password / .env)
     NODE_1, NODE_2 = build_node_dicts(args)
+
+    # Set peer_icl_ip: each node's peer-ip = the OTHER node's ICL IP (strip /prefix)
+    NODE_1["peer_icl_ip"] = NODE_2["icl_ip"].split("/")[0]
+    NODE_2["peer_icl_ip"] = NODE_1["icl_ip"].split("/")[0]
 
     print("""
 ╔══════════════════════════════════════════════════════════╗
