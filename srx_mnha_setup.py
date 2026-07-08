@@ -303,7 +303,9 @@ def run_junos_config(device: dict, config_commands: list[str]) -> str:
     """
     full_output = ""
     client = ssh_connect(device)
-    channel = client.invoke_shell()
+    # Set wide terminal (width=512) so Junos never wraps or truncates
+    # long command echoes with "..." — the full command is always visible.
+    channel = client.invoke_shell(term="vt100", width=512, height=64)
 
     # ── Step 1: drain login banner and detect initial prompt ─────────────────
     print("    [1] Waiting for initial prompt ...")
@@ -477,15 +479,17 @@ def build_icl_commands(node: dict) -> list[str]:
       - traceoptions             (for troubleshooting only)
     """
     iface = node["icl_interface"]
+    icl_ip = node["icl_ip"]
     return [
-        # ── ICL physical interface ────────────────────────────────────────────
+        # ── ICL physical interface (just a regular routed L3 interface) ───────
+        # No special chassis-level "icl-interface" declaration needed in MNHA.
+        # The ICL is identified by the peer reaching this IP over the direct link.
         f"set interfaces {iface} description \"MNHA-ICL-to-peer\"",
-        f"set interfaces {iface} unit 0 family inet address {node['icl_ip']}",
+        f"set interfaces {iface} unit 0 family inet address {icl_ip}",
 
-        # ── MNHA — required parameters ────────────────────────────────────────
+        # ── MNHA — required chassis parameters ───────────────────────────────
         f"set chassis high-availability local-id {node['local_id']}",
         f"set chassis high-availability peer-id {node['peer_id']}",
-        f"set chassis high-availability icl-interface {iface}",
 
         # ── MNHA — optional parameters (uncomment to override Junos defaults) ─
         # f"set chassis high-availability heartbeat-interval 1000",   # default: 1000 ms
@@ -568,8 +572,18 @@ def configure_node(node: dict, node_label: str) -> None:
         print(f"\n  --- Output from {node_label} ---")
         print(textwrap.indent(output, "  "))
 
-        if "error" in output.lower() or "invalid" in output.lower():
-            print(f"\n  [WARNING] Possible errors detected in {node_label} output.")
+        # Check for real errors — look for "syntax error" or "error:" patterns
+        # (avoid false positives from words like "icl-interface" containing "error")
+        error_lines = [
+            line for line in output.splitlines()
+            if "syntax error" in line.lower()
+            or line.strip().lower().startswith("error:")
+            or "invalid input" in line.lower()
+        ]
+        if error_lines:
+            print(f"\n  [WARNING] Errors detected in {node_label} output:")
+            for line in error_lines:
+                print(f"    {line.strip()}")
         else:
             print(f"\n  [OK] Configuration committed on {node_label}.")
 
