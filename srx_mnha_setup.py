@@ -310,34 +310,43 @@ def run_junos_config(device: dict, config_commands: list[str]) -> str:
     banner = wait_for_prompt(channel, expected=">", timeout=10)
     full_output += banner
 
-    # If we landed in a Unix shell (%), send 'cli' to enter Junos CLI.
-    # If already at '>', skip — sending 'cli' there would just print a warning.
-    if "%" in banner and ">" not in banner:
-        print("    [2] Entering Junos CLI from Unix shell ...")
-        channel.send("cli\n")
-        out = wait_for_prompt(channel, expected=">", timeout=10)
-        full_output += out
-        print(f"        Got prompt: {'>' if '>' in out else '(not found)'}")
+    # ── Step 2: ensure we are in Junos CLI (not Unix shell) ──────────────────
+    # Junos operational prompt ends with '>'  e.g. root@srx1>
+    # Unix shell prompt ends with '%' or '$'  e.g. root@srx1%
+    # We always send 'cli' — harmless if already in Junos CLI.
+    print("    [2] Entering Junos CLI ...")
+    channel.send("cli\n")
+    out = wait_for_prompt(channel, expected=">", timeout=10)
+    full_output += out
+    if ">" in out:
+        print("        Junos CLI operational prompt (>) confirmed")
     else:
-        print("    [2] Already at Junos CLI operational prompt (>)")
+        print("        [WARNING] Could not confirm Junos CLI prompt — output:")
+        print(textwrap.indent(out, "          "))
 
-    # ── Step 2: enter CLI edit mode ───────────────────────────────────────────
-    # "configure" enters [edit] mode — the standard CLI edit mode in Junos
-    # where all 'set' commands are accepted. Prompt changes from > to #.
+    # ── Step 3: enter config mode and confirm [edit] ──────────────────────────
+    # IMPORTANT: wait for "[edit]" not just "#" — the Unix shell also has "#"
+    # in its prompt (e.g. root@host:~#) which would be a false match.
+    # Junos config mode always prints "[edit]" on its own line above the prompt.
     print("    [3] Entering CLI edit mode (configure) ...")
     channel.send("configure\n")
-    out = wait_for_prompt(channel, expected="#", timeout=10)
+    out = wait_for_prompt(channel, expected="[edit]", timeout=10)
     full_output += out
-    if "#" in out:
-        print("        CLI edit mode entered — prompt is now [edit] #")
+    if "[edit]" in out:
+        print("        Config mode confirmed — [edit] prompt detected ✓")
     else:
-        print("        [WARNING] Edit mode prompt (#) not detected — check output")
+        print("        [ERROR] Config mode NOT entered. Raw output:")
+        print(textwrap.indent(out, "          "))
+        print("        Aborting — device may still be in Unix shell.")
+        channel.close()
+        client.close()
+        raise RuntimeError(f"Failed to enter Junos config mode on {device['host']}")
 
-    # ── Step 3: save checkpoint before touching anything ─────────────────────
+    # ── Step 4: save checkpoint before touching anything ─────────────────────
     checkpoint_file = "/var/tmp/pre_mnha_checkpoint.conf"
     print(f"    [4] Saving checkpoint → {checkpoint_file} ...")
     channel.send(f"save {checkpoint_file}\n")
-    out = wait_for_prompt(channel, expected="#", timeout=10)
+    out = wait_for_prompt(channel, expected="[edit]", timeout=10)
     full_output += out
     if "saved" in out.lower() or checkpoint_file in out:
         print(f"        Checkpoint saved ✓  ({checkpoint_file})")
@@ -347,12 +356,12 @@ def run_junos_config(device: dict, config_commands: list[str]) -> str:
     print(f"          load override {checkpoint_file}")
     print(f"          commit")
 
-    # ── Step 4: push each 'set' command individually ─────────────────────────
+    # ── Step 5: push each 'set' command individually ─────────────────────────
     print(f"    [5] Pushing {len(config_commands)} configuration commands ...")
     errors_found = False
     for cmd in config_commands:
         channel.send(cmd + "\n")
-        out = wait_for_prompt(channel, expected="#", timeout=5)
+        out = wait_for_prompt(channel, expected="[edit]", timeout=5)
         full_output += out
         # Surface any error lines immediately
         for line in out.splitlines():
@@ -365,7 +374,7 @@ def run_junos_config(device: dict, config_commands: list[str]) -> str:
         print("\n    [6] SKIPPING commit — errors detected in set commands above.")
         print("        Running 'rollback 0' to discard candidate config ...")
         channel.send("rollback 0\n")
-        wait_for_prompt(channel, expected="#", timeout=5)
+        wait_for_prompt(channel, expected="[edit]", timeout=5)
         print(f"        Restore from checkpoint manually if needed:")
         print(f"          load override {checkpoint_file}")
         print(f"          commit")
@@ -376,7 +385,7 @@ def run_junos_config(device: dict, config_commands: list[str]) -> str:
         # Only proceed to "commit" if check passes.
         print("    [6] Running commit check (dry-run validation) ...")
         channel.send("commit check\n")
-        out = wait_for_prompt(channel, expected="#", timeout=20)
+        out = wait_for_prompt(channel, expected="[edit]", timeout=20)
         full_output += out
 
         check_ok = "configuration check succeeds" in out.lower()
@@ -391,7 +400,7 @@ def run_junos_config(device: dict, config_commands: list[str]) -> str:
             print("        " + "─" * 50)
             print("        Running 'rollback 0' to discard candidate config ...")
             channel.send("rollback 0\n")
-            wait_for_prompt(channel, expected="#", timeout=5)
+            wait_for_prompt(channel, expected="[edit]", timeout=5)
             print(f"        Restore from checkpoint if needed:")
             print(f"          load override {checkpoint_file}")
             print(f"          commit")
@@ -417,7 +426,7 @@ def run_junos_config(device: dict, config_commands: list[str]) -> str:
                     if "error" in line.lower():
                         print(f"          {line.strip()}")
                 channel.send(f"load override {checkpoint_file}\n")
-                wait_for_prompt(channel, expected="#", timeout=15)
+                wait_for_prompt(channel, expected="[edit]", timeout=15)
                 channel.send("commit\n")
                 out2 = wait_for_prompt(channel, expected="commit complete", timeout=30)
                 full_output += out2
@@ -428,7 +437,7 @@ def run_junos_config(device: dict, config_commands: list[str]) -> str:
 
             else:
                 # Drain remaining output and try once more
-                out2 = wait_for_prompt(channel, expected="#", timeout=15)
+                out2 = wait_for_prompt(channel, expected="[edit]", timeout=15)
                 full_output += out2
                 if "commit complete" in (out + out2).lower():
                     print("        Commit complete ✓")
