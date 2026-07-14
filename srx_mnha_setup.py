@@ -493,6 +493,8 @@ def build_lan_commands(node: dict, skip_ifaces: set | None = None) -> list[str]:
             continue
         cmds += [
             f"set interfaces {iface} description \"LAN{idx}-NODE{node['local_id']}\"",
+            # Delete any previously set IPs before applying new one (prevents accumulation)
+            f"delete interfaces {iface} unit 0 family inet address",
             f"set interfaces {iface} unit 0 family inet address {ip}",
             # Bare zone assignment — same as ge-0/0/2.0 that SD already recognises.
             # Zone-level host-inbound-traffic (ping/ssh/https) already covers all
