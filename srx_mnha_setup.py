@@ -511,47 +511,44 @@ def build_icl_commands(node: dict) -> list[str]:
     ]
 
 
-def build_lan_commands(node: dict) -> list[str]:
+def build_lan_commands(node: dict, skip_ifaces: set | None = None) -> list[str]:
     """
-    JunOS 'set' commands to configure the LAN-facing interface.
-
-    Each node gets its own unique IP on the same /24 subnet:
-      Node 1 → 10.10.10.1/24
-      Node 2 → 10.10.10.2/24
-
-    VRRP (optional) adds a shared virtual IP (e.g. 10.10.10.254) so
-    LAN clients always have a single gateway regardless of which node
-    is active. Uncomment the VRRP block below to enable it.
+    JunOS 'set' commands to configure multiple LAN-facing interfaces.
+    Supports up to 5 LANs (or however many are in node['lan_ifaces']).
+    skip_ifaces: interfaces already configured on the device — those are skipped.
     """
-    iface  = node["lan_interface"]
-    cmds = [
-        # Physical interface description
-        f"set interfaces {iface} description \"{node['lan_description']}\"",
-        # unit 0 — logical unit carrying the node's own IP
-        f"set interfaces {iface} unit 0 family inet address {node['lan_ip']}",
-        # Security zone — bind unit 0 to the trust zone
-        f"set security zones security-zone trust interfaces {iface}.0",
-        # Allow host-inbound services on the LAN interface
-        f"set security zones security-zone trust interfaces {iface}.0 "
-        f"host-inbound-traffic system-services ping",
-        f"set security zones security-zone trust interfaces {iface}.0 "
-        f"host-inbound-traffic system-services ssh",
+    skip_ifaces = skip_ifaces or set()
+    cmds = []
+    srg_lans = []   # track configured LANs for SRG registration
 
-        # ── OPTIONAL: VRRP — shared virtual gateway for LAN clients ──────────
-        # Uncomment the lines below to enable VRRP on the LAN interface.
-        # Both nodes share the VIP 10.10.10.254; node with higher priority
-        # becomes master. Adjust vrid, priority, and virtual-address as needed.
-        #
-        # f"set interfaces {iface} unit 0 family inet vrrp-group 10 "
-        # f"virtual-address {node.get('lan_vip', '10.10.10.254')}",
-        # f"set interfaces {iface} unit 0 family inet vrrp-group 10 "
-        # f"priority {node.get('vrrp_priority', 100)}",
-        # f"set interfaces {iface} unit 0 family inet vrrp-group 10 "
-        # f"preempt",
-        # f"set interfaces {iface} unit 0 family inet vrrp-group 10 "
-        # f"accept-data",
-        # ─────────────────────────────────────────────────────────────────────
-    ]
+    for idx, (iface, ip) in enumerate(
+            zip(node.get("lan_ifaces", [node.get("lan_interface", "ge-0/0/2")]),
+                node.get("lan_ips",    [node.get("lan_ip", "10.30.30.1/24")])), 1):
+        if iface in skip_ifaces:
+            print(f"        [skip] LAN {idx}: {iface} ({ip}) — already configured")
+            srg_lans.append(iface)   # still register in SRG
+            continue
+        cmds += [
+            f"set interfaces {iface} description \"LAN{idx}-NODE{node['local_id']}\"",
+            f"set interfaces {iface} unit 0 family inet address {ip}",
+            f"set security zones security-zone trust interfaces {iface}.0",
+            f"set security zones security-zone trust interfaces {iface}.0 "
+            f"host-inbound-traffic system-services ping",
+            f"set security zones security-zone trust interfaces {iface}.0 "
+            f"host-inbound-traffic system-services ssh",
+        ]
+        srg_lans.append(iface)
+
+    # ── SRG — register LAN interfaces so virtual IPs can be assigned ──────────
+    # Without this, MNHA raises:
+    #   "virtual IP for interface X.0 is not a configured LAN or WAN interface"
+    srg = 1
+    for iface in srg_lans:
+        cmds.append(
+            f"set chassis high-availability service-redundancy-group {srg} "
+            f"lan-interface {iface}"
+        )
+
     return cmds
 
 
@@ -564,8 +561,27 @@ def configure_node(node: dict, node_label: str) -> None:
     print(f"  Configuring {node_label}  ({node['host']})")
     print(f"{'=' * 60}")
 
+    # Pre-check: detect already-configured interfaces
+    print(f"\n  Pre-checking existing interfaces on {node_label} ...")
+    try:
+        _client = __import__("paramiko").SSHClient()
+        _client.set_missing_host_key_policy(__import__("paramiko").AutoAddPolicy())
+        _client.connect(node["host"], port=node["port"],
+                        username=node["username"], password=node["password"],
+                        look_for_keys=False, allow_agent=False, timeout=10)
+        _, _out, _ = _client.exec_command(
+            "cli -c 'show interfaces terse | match inet'", timeout=10)
+        _lines = _out.read().decode(errors="replace").splitlines()
+        skip_ifaces = {ln.split()[0].split(".")[0]
+                       for ln in _lines if len(ln.split()) >= 4 and "inet" in ln.split()}
+        _client.close()
+        if skip_ifaces:
+            print(f"    Already configured: {', '.join(sorted(skip_ifaces))}")
+    except Exception:
+        skip_ifaces = set()
+
     icl_cmds = build_icl_commands(node)
-    lan_cmds = build_lan_commands(node)
+    lan_cmds = build_lan_commands(node, skip_ifaces)
     all_cmds  = icl_cmds + lan_cmds
 
     print(f"\n  Commands to be applied on {node_label}:")

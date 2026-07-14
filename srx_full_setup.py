@@ -1,22 +1,22 @@
 #!/usr/bin/env python3
 """
-Juniper SRX MNHA — Full Setup Script (ICL + LAN + WAN)
-=======================================================
-Combines srx_mnha_setup.py (ICL + LAN) and srx_wan_setup.py (WAN)
-into a single SSH session per node:
+Juniper SRX MNHA — Full Setup Script (ICL + multi-LAN + multi-WAN)
+====================================================================
+Single SSH session per node:
 
-  Single connection per node
-    ├── Checkpoint saved
-    ├── ICL interface + IP
-    ├── MNHA chassis high-availability (local-id, peer-id, liveness-detection)
-    ├── LAN interface + IP + trust zone
-    ├── WAN interface + IP + untrust zone
-    ├── Default static route
-    ├── Source NAT (optional, --enable-nat)
-    ├── commit check
-    └── commit
+  ├── Pre-check: detect already-configured interfaces → skip them
+  ├── Checkpoint saved
+  ├── delete chassis high-availability  (clean slate for HA config)
+  ├── ICL interface + IP
+  ├── MNHA chassis HA (local-id, peer-id, liveness-detection)
+  ├── LAN interfaces × 5  (skips any already configured)
+  ├── WAN interfaces × 5  (skips any already configured)
+  ├── Default static routes per WAN
+  ├── Source NAT (optional, --enable-nat)
+  ├── commit check
+  └── commit
 
-All settings read from srx_mnha.env  (same file as the individual scripts).
+Settings read from srx_mnha.env.
 Priority: CLI args  >  srx_mnha.env  >  built-in defaults
 """
 
@@ -31,7 +31,6 @@ import textwrap
 # ─── BUILT-IN DEFAULTS ────────────────────────────────────────────────────────
 
 DEFAULTS = {
-    # Management
     "n1_host":       "10.0.0.1",
     "n2_host":       "10.0.0.2",
     "username":      "admin",
@@ -40,15 +39,15 @@ DEFAULTS = {
     "icl_interface": "ge-0/0/0",
     "n1_icl_ip":     "10.255.255.1/30",
     "n2_icl_ip":     "10.255.255.2/30",
-    # LAN
-    "lan_interface": "ge-0/0/2",
-    "n1_lan_ip":     "10.10.10.1/24",
-    "n2_lan_ip":     "10.10.10.2/24",
-    # WAN
-    "wan_interface": "ge-0/0/1",
-    "n1_wan_ip":     "10.20.20.1/24",
-    "n2_wan_ip":     "10.20.20.2/24",
-    "wan_gateway":   "10.20.20.254",
+    # LAN (5 interfaces, comma-separated)
+    "lan_ifaces":    "ge-0/0/2,ge-0/0/3,ge-0/0/4,ge-0/0/5,ge-0/0/6",
+    "n1_lan_ips":    "10.30.30.1/24,10.31.31.1/24,10.32.32.1/24,10.33.33.1/24,10.34.34.1/24",
+    "n2_lan_ips":    "10.30.30.2/24,10.31.31.2/24,10.32.32.2/24,10.33.33.2/24,10.34.34.2/24",
+    # WAN (5 interfaces, comma-separated)
+    "wan_ifaces":    "ge-0/0/7,ge-0/0/8,ge-0/0/9,ge-0/0/10,ge-0/0/11",
+    "n1_wan_ips":    "10.20.20.1/24,10.21.21.1/24,10.22.22.1/24,10.23.23.1/24,10.24.24.1/24",
+    "n2_wan_ips":    "10.20.20.2/24,10.21.21.2/24,10.22.22.2/24,10.23.23.2/24,10.24.24.2/24",
+    "wan_gateways":  "10.20.20.254,10.21.21.254,10.22.22.254,10.23.23.254,10.24.24.254",
 }
 
 # ─── .ENV LOADER ─────────────────────────────────────────────────────────────
@@ -72,30 +71,27 @@ def load_env_file(path: str) -> dict:
     return env
 
 
+def _csv(val: str) -> list[str]:
+    """Split a comma-separated string into a stripped list."""
+    return [v.strip() for v in val.split(",") if v.strip()]
+
+
 def merge_config(env: dict) -> dict:
     merged = dict(DEFAULTS)
-    simple_keys = [
-        "n1_host", "n2_host", "wan_gateway",
+    for key in (
+        "n1_host", "n2_host",
         "n1_icl_ip", "n2_icl_ip",
-        "n1_lan_ip", "n2_lan_ip",
-        "n1_wan_ip", "n2_wan_ip",
-    ]
-    for k in simple_keys:
-        if k in env:
-            merged[k] = env[k]
-    # Per-node interface overrides
-    for attr, default_key in [
-        ("n1_icl_iface", "icl_interface"), ("n2_icl_iface", "icl_interface"),
-        ("n1_lan_iface", "lan_interface"), ("n2_lan_iface", "lan_interface"),
-        ("n1_wan_iface", "wan_interface"), ("n2_wan_iface", "wan_interface"),
-        ("n1_user",      "username"),      ("n2_user",      "username"),
-    ]:
+        "lan_ifaces", "n1_lan_ips", "n2_lan_ips",
+        "wan_ifaces", "n1_wan_ips", "n2_wan_ips",
+        "wan_gateways",
+    ):
+        if key in env:
+            merged[key] = env[key]
+    for attr in ("n1_icl_iface", "n2_icl_iface", "n1_user", "n2_user"):
         if attr in env:
             merged[attr] = env[attr]
-    if "ssh_port"     in env:
-        merged["port"]     = int(env["ssh_port"])
-    if "ssh_password" in env:
-        merged["password"] = env["ssh_password"]
+    if "ssh_port"     in env: merged["port"]     = int(env["ssh_port"])
+    if "ssh_password" in env: merged["password"] = env["ssh_password"]
     return merged
 
 
@@ -104,7 +100,7 @@ def merge_config(env: dict) -> dict:
 
 def parse_args(cfg: dict) -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="Full SRX MNHA setup — ICL + LAN + WAN in one SSH session",
+        description="Full SRX MNHA setup — ICL + multi-LAN + multi-WAN",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     p.add_argument("--env-file", default="srx_mnha.env")
@@ -112,32 +108,35 @@ def parse_args(cfg: dict) -> argparse.Namespace:
     g1 = p.add_argument_group("Node 1 (primary)")
     g1.add_argument("--n1-host",      default=cfg["n1_host"])
     g1.add_argument("--n1-user",      default=cfg.get("n1_user", cfg["username"]))
-    g1.add_argument("--n1-icl-ip",    default=cfg["n1_icl_ip"],    metavar="A.B.C.D/30")
+    g1.add_argument("--n1-icl-ip",    default=cfg["n1_icl_ip"])
     g1.add_argument("--n1-icl-iface", default=cfg.get("n1_icl_iface", cfg["icl_interface"]))
-    g1.add_argument("--n1-lan-ip",    default=cfg["n1_lan_ip"],    metavar="A.B.C.D/X")
-    g1.add_argument("--n1-lan-iface", default=cfg.get("n1_lan_iface", cfg["lan_interface"]))
-    g1.add_argument("--n1-wan-ip",    default=cfg["n1_wan_ip"],    metavar="A.B.C.D/X")
-    g1.add_argument("--n1-wan-iface", default=cfg.get("n1_wan_iface", cfg["wan_interface"]))
+    g1.add_argument("--n1-lan-ips",   default=cfg["n1_lan_ips"],
+                    help="Comma-separated LAN IPs for node 1")
+    g1.add_argument("--n1-wan-ips",   default=cfg["n1_wan_ips"],
+                    help="Comma-separated WAN IPs for node 1")
 
     g2 = p.add_argument_group("Node 2 (secondary)")
     g2.add_argument("--n2-host",      default=cfg["n2_host"])
     g2.add_argument("--n2-user",      default=cfg.get("n2_user", cfg["username"]))
-    g2.add_argument("--n2-icl-ip",    default=cfg["n2_icl_ip"],    metavar="A.B.C.D/30")
+    g2.add_argument("--n2-icl-ip",    default=cfg["n2_icl_ip"])
     g2.add_argument("--n2-icl-iface", default=cfg.get("n2_icl_iface", cfg["icl_interface"]))
-    g2.add_argument("--n2-lan-ip",    default=cfg["n2_lan_ip"],    metavar="A.B.C.D/X")
-    g2.add_argument("--n2-lan-iface", default=cfg.get("n2_lan_iface", cfg["lan_interface"]))
-    g2.add_argument("--n2-wan-ip",    default=cfg["n2_wan_ip"],    metavar="A.B.C.D/X")
-    g2.add_argument("--n2-wan-iface", default=cfg.get("n2_wan_iface", cfg["wan_interface"]))
+    g2.add_argument("--n2-lan-ips",   default=cfg["n2_lan_ips"],
+                    help="Comma-separated LAN IPs for node 2")
+    g2.add_argument("--n2-wan-ips",   default=cfg["n2_wan_ips"],
+                    help="Comma-separated WAN IPs for node 2")
 
     gs = p.add_argument_group("Shared options")
-    gs.add_argument("--wan-gateway",  default=cfg["wan_gateway"])
+    gs.add_argument("--lan-ifaces",   default=cfg["lan_ifaces"],
+                    help="Comma-separated LAN interface names (same on both nodes)")
+    gs.add_argument("--wan-ifaces",   default=cfg["wan_ifaces"],
+                    help="Comma-separated WAN interface names (same on both nodes)")
+    gs.add_argument("--wan-gateways", default=cfg["wan_gateways"],
+                    help="Comma-separated WAN gateways (one per WAN interface)")
     gs.add_argument("--port",         type=int, default=cfg["port"])
-    gs.add_argument("--password",     default=cfg.get("password"),
-                    help="SSH password — omit to prompt securely")
+    gs.add_argument("--password",     default=cfg.get("password"))
     gs.add_argument("--enable-nat",   action="store_true",
                     help="Add source NAT rule (trust → untrust masquerade)")
-    gs.add_argument("--verify",       action="store_true",
-                    help="Run show commands after configuring")
+    gs.add_argument("--verify",       action="store_true")
 
     return p.parse_args()
 
@@ -146,6 +145,14 @@ def build_node_dicts(args: argparse.Namespace) -> tuple[dict, dict]:
     password = args.password
     if not password:
         password = getpass.getpass("SSH password (used for both nodes): ")
+
+    lan_ifaces   = _csv(args.lan_ifaces)
+    wan_ifaces   = _csv(args.wan_ifaces)
+    wan_gateways = _csv(args.wan_gateways)
+
+    # Pad gateways to match WAN count (repeat last if fewer supplied)
+    while len(wan_gateways) < len(wan_ifaces):
+        wan_gateways.append(wan_gateways[-1] if wan_gateways else "0.0.0.0")
 
     node1 = {
         "host":          args.n1_host,
@@ -156,11 +163,11 @@ def build_node_dicts(args: argparse.Namespace) -> tuple[dict, dict]:
         "peer_id":       2,
         "icl_interface": args.n1_icl_iface,
         "icl_ip":        args.n1_icl_ip,
-        "lan_interface": args.n1_lan_iface,
-        "lan_ip":        args.n1_lan_ip,
-        "wan_interface": args.n1_wan_iface,
-        "wan_ip":        args.n1_wan_ip,
-        "wan_gateway":   args.wan_gateway,
+        "lan_ifaces":    lan_ifaces,
+        "lan_ips":       _csv(args.n1_lan_ips),
+        "wan_ifaces":    wan_ifaces,
+        "wan_ips":       _csv(args.n1_wan_ips),
+        "wan_gateways":  wan_gateways,
         "enable_nat":    args.enable_nat,
     }
     node2 = {
@@ -172,88 +179,16 @@ def build_node_dicts(args: argparse.Namespace) -> tuple[dict, dict]:
         "peer_id":       1,
         "icl_interface": args.n2_icl_iface,
         "icl_ip":        args.n2_icl_ip,
-        "lan_interface": args.n2_lan_iface,
-        "lan_ip":        args.n2_lan_ip,
-        "wan_interface": args.n2_wan_iface,
-        "wan_ip":        args.n2_wan_ip,
-        "wan_gateway":   args.wan_gateway,
+        "lan_ifaces":    lan_ifaces,
+        "lan_ips":       _csv(args.n2_lan_ips),
+        "wan_ifaces":    wan_ifaces,
+        "wan_ips":       _csv(args.n2_wan_ips),
+        "wan_gateways":  wan_gateways,
         "enable_nat":    args.enable_nat,
     }
-    # peer_icl_ip: each node's peer-ip = the OTHER node's ICL host address
     node1["peer_icl_ip"] = node2["icl_ip"].split("/")[0]
     node2["peer_icl_ip"] = node1["icl_ip"].split("/")[0]
     return node1, node2
-
-
-# ─── COMMAND BUILDER ─────────────────────────────────────────────────────────
-
-
-def build_all_commands(node: dict) -> list[str]:
-    """
-    Return the complete ordered list of JunOS 'set' commands for one node:
-      1. ICL interface
-      2. MNHA chassis high-availability
-      3. LAN interface + trust zone
-      4. WAN interface + untrust zone
-      5. Default static route
-      6. Source NAT (optional)
-    """
-    icl   = node["icl_interface"]
-    lan   = node["lan_interface"]
-    wan   = node["wan_interface"]
-    pid   = node["peer_id"]
-
-    cmds = [
-        # ── 0. Clean slate — delete any existing chassis HA config first ──────
-        # Prevents "local-id must be different from peer-id" conflicts from
-        # leftover peer-id values committed by a previous partial run.
-        # Only removes the chassis high-availability stanza — all interface
-        # IPs, zones, and routes are untouched.
-        "delete chassis high-availability",
-
-        # ── 1. ICL interface ─────────────────────────────────────────────────
-        f"set interfaces {icl} description \"MNHA-ICL-to-peer\"",
-        f"set interfaces {icl} unit 0 family inet address {node['icl_ip']}",
-
-        # ── 2. MNHA chassis high-availability ────────────────────────────────
-        f"set chassis high-availability local-id {node['local_id']}",
-        f"set chassis high-availability peer-id {pid} peer-ip {node['peer_icl_ip']}",
-        f"set chassis high-availability peer-id {pid} interface {icl}",
-        f"set chassis high-availability peer-id {pid} liveness-detection minimum-interval 1000",
-        f"set chassis high-availability peer-id {pid} liveness-detection multiplier 3",
-
-        # ── 3. LAN interface + trust zone ─────────────────────────────────────
-        f"set interfaces {lan} description \"LAN-NODE{node['local_id']}\"",
-        f"set interfaces {lan} unit 0 family inet address {node['lan_ip']}",
-        f"set security zones security-zone trust interfaces {lan}.0",
-        f"set security zones security-zone trust interfaces {lan}.0 "
-        f"host-inbound-traffic system-services ping",
-        f"set security zones security-zone trust interfaces {lan}.0 "
-        f"host-inbound-traffic system-services ssh",
-
-        # ── 4. WAN interface + untrust zone ───────────────────────────────────
-        f"set interfaces {wan} description \"WAN-NODE{node['local_id']}\"",
-        f"set interfaces {wan} unit 0 family inet address {node['wan_ip']}",
-        f"set security zones security-zone untrust interfaces {wan}.0",
-        f"set security zones security-zone untrust interfaces {wan}.0 "
-        f"host-inbound-traffic system-services ping",
-
-        # ── 5. Default route ──────────────────────────────────────────────────
-        f"set routing-options static route 0.0.0.0/0 next-hop {node['wan_gateway']}",
-    ]
-
-    # ── 6. Optional source NAT (trust → untrust masquerade) ──────────────────
-    if node.get("enable_nat"):
-        cmds += [
-            "set security nat source rule-set TRUST-TO-WAN from zone trust",
-            "set security nat source rule-set TRUST-TO-WAN to zone untrust",
-            "set security nat source rule-set TRUST-TO-WAN rule NAT-RULE "
-            "match source-address 0.0.0.0/0",
-            "set security nat source rule-set TRUST-TO-WAN rule NAT-RULE "
-            "then source-nat interface",
-        ]
-
-    return cmds
 
 
 # ─── SSH HELPERS ─────────────────────────────────────────────────────────────
@@ -287,14 +222,158 @@ def wait_for_prompt(channel: paramiko.Channel, expected: str,
     return output
 
 
+def get_configured_ifaces(client: paramiko.SSHClient) -> set:
+    """
+    Return the set of physical interface names that already have an
+    IPv4 address configured on the device.
+    Uses 'show interfaces terse' — no config mode needed.
+
+    Example line: ge-0/0/2.0   up  up  inet  10.30.30.1/24
+    """
+    _, stdout, _ = client.exec_command(
+        "cli -c 'show interfaces terse | match inet'", timeout=10
+    )
+    out = stdout.read().decode(errors="replace")
+    configured: set = set()
+    for line in out.splitlines():
+        parts = line.split()
+        if len(parts) >= 4 and "inet" in parts:
+            # parts[0] is like "ge-0/0/2.0"
+            iface_unit = parts[0]
+            iface = iface_unit.split(".")[0]  # strip ".0"
+            configured.add(iface)
+    return configured
+
+
+# ─── COMMAND BUILDER ─────────────────────────────────────────────────────────
+
+
+def build_all_commands(node: dict, skip_ifaces: set) -> list[str]:
+    """
+    Build the full ordered list of JunOS set commands for one node.
+    skip_ifaces: set of interface names already configured — those are skipped.
+    """
+    icl  = node["icl_interface"]
+    pid  = node["peer_id"]
+    cmds = []
+
+    # ── 0. Clean slate for chassis HA ─────────────────────────────────────────
+    cmds += [
+        "delete chassis high-availability",
+    ]
+
+    # ── 1. ICL interface ──────────────────────────────────────────────────────
+    if icl in skip_ifaces:
+        print(f"    [skip] ICL {icl} already configured — skipping interface IP")
+    else:
+        cmds += [
+            f"set interfaces {icl} description \"MNHA-ICL-to-peer\"",
+            f"set interfaces {icl} unit 0 family inet address {node['icl_ip']}",
+        ]
+
+    # ── 2. MNHA chassis high-availability ─────────────────────────────────────
+    cmds += [
+        f"set chassis high-availability local-id {node['local_id']}",
+        f"set chassis high-availability peer-id {pid} peer-ip {node['peer_icl_ip']}",
+        f"set chassis high-availability peer-id {pid} interface {icl}",
+        f"set chassis high-availability peer-id {pid} liveness-detection minimum-interval 1000",
+        f"set chassis high-availability peer-id {pid} liveness-detection multiplier 3",
+    ]
+
+    # ── 3. LAN interfaces (5 × skip-aware) ────────────────────────────────────
+    configured_lans = []   # track which LANs we actually configure
+    for idx, (iface, ip) in enumerate(zip(node["lan_ifaces"], node["lan_ips"]), 1):
+        if iface in skip_ifaces:
+            print(f"    [skip] LAN {idx}: {iface} ({ip}) — already configured")
+            configured_lans.append(iface)   # still register in SRG even if IP exists
+            continue
+        zone_name = "trust"
+        cmds += [
+            f"set interfaces {iface} description \"LAN{idx}-NODE{node['local_id']}\"",
+            f"set interfaces {iface} unit 0 family inet address {ip}",
+            f"set security zones security-zone {zone_name} interfaces {iface}.0",
+            f"set security zones security-zone {zone_name} interfaces {iface}.0 "
+            f"host-inbound-traffic system-services ping",
+            f"set security zones security-zone {zone_name} interfaces {iface}.0 "
+            f"host-inbound-traffic system-services ssh",
+        ]
+        configured_lans.append(iface)
+
+    # ── 4. WAN interfaces (5 × skip-aware) + static routes ───────────────────
+    configured_wans = []   # track which WANs we actually configure
+    for idx, (iface, ip, gw) in enumerate(
+            zip(node["wan_ifaces"], node["wan_ips"], node["wan_gateways"]), 1):
+        if iface in skip_ifaces:
+            print(f"    [skip] WAN {idx}: {iface} ({ip}) — already configured")
+            configured_wans.append(iface)
+            continue
+        zone_name = "untrust"
+        cmds += [
+            f"set interfaces {iface} description \"WAN{idx}-NODE{node['local_id']}\"",
+            f"set interfaces {iface} unit 0 family inet address {ip}",
+            f"set security zones security-zone {zone_name} interfaces {iface}.0",
+            f"set security zones security-zone {zone_name} interfaces {iface}.0 "
+            f"host-inbound-traffic system-services ping",
+        ]
+        if idx == 1:
+            cmds.append(f"set routing-options static route 0.0.0.0/0 next-hop {gw}")
+        else:
+            wan_subnet = ip.rsplit(".", 1)[0] + ".0/" + ip.split("/")[1]
+            cmds.append(f"set routing-options static route {wan_subnet} next-hop {gw}")
+        configured_wans.append(iface)
+
+    # ── 5. SRG (Service Redundancy Group) — register LAN and WAN interfaces ───
+    # MNHA requires interfaces to be explicitly listed as lan-interface or
+    # wan-interface inside the SRG before virtual IPs can be assigned to them.
+    # Without this, MNHA raises:
+    #   "virtual IP for interface X.0 is not a configured LAN or WAN interface"
+    srg = 1
+    for iface in configured_lans:
+        cmds.append(
+            f"set chassis high-availability service-redundancy-group {srg} "
+            f"lan-interface {iface}"
+        )
+    for iface in configured_wans:
+        cmds.append(
+            f"set chassis high-availability service-redundancy-group {srg} "
+            f"wan-interface {iface}"
+        )
+
+    # ── 5. Optional source NAT ────────────────────────────────────────────────
+    if node.get("enable_nat"):
+        cmds += [
+            "set security nat source rule-set TRUST-TO-WAN from zone trust",
+            "set security nat source rule-set TRUST-TO-WAN to zone untrust",
+            "set security nat source rule-set TRUST-TO-WAN rule NAT-RULE "
+            "match source-address 0.0.0.0/0",
+            "set security nat source rule-set TRUST-TO-WAN rule NAT-RULE "
+            "then source-nat interface",
+        ]
+
+    return cmds
+
+
 # ─── FULL CONFIG RUNNER ───────────────────────────────────────────────────────
 
 
-def run_full_config(device: dict, config_commands: list[str]) -> str:
+def run_full_config(device: dict) -> str:
     checkpoint_file = "/var/tmp/pre_full_setup_checkpoint.conf"
     full_output = ""
 
     client = ssh_connect(device)
+
+    # ── Pre-check: detect already-configured interfaces (before config mode) ──
+    print("    [pre] Checking existing interface configuration ...")
+    skip_ifaces = get_configured_ifaces(client)
+    if skip_ifaces:
+        print(f"    [pre] Already configured: {', '.join(sorted(skip_ifaces))}")
+    else:
+        print("    [pre] No existing interface IPs found — configuring all")
+
+    # Build commands now that we know what to skip
+    config_commands = build_all_commands(device, skip_ifaces)
+    print(f"    [pre] {len(config_commands)} commands queued after skip checks")
+
     channel = client.invoke_shell(term="vt100", width=512, height=64)
 
     # ── 1. Enter Junos CLI ────────────────────────────────────────────────────
@@ -337,12 +416,12 @@ def run_full_config(device: dict, config_commands: list[str]) -> str:
 
     # ── 5. Commit check ───────────────────────────────────────────────────────
     if errors_found:
-        print("\n    [5] SKIPPING commit — errors detected in commands above.")
+        print("\n    [5] SKIPPING commit — errors in commands above.")
         channel.send("rollback 0\n")
         wait_for_prompt(channel, expected="[edit]", timeout=5)
-        print(f"        Rolled back. Restore from: load override {checkpoint_file} → commit")
+        print(f"        Rolled back. Restore: load override {checkpoint_file} → commit")
     else:
-        print("    [5] Running commit check (dry-run) ...")
+        print("    [5] Running commit check ...")
         channel.send("commit check\n")
         out = wait_for_prompt(channel, expected="[edit]", timeout=20)
         full_output += out
@@ -359,11 +438,8 @@ def run_full_config(device: dict, config_commands: list[str]) -> str:
             print("        " + "─" * 52)
             channel.send("rollback 0\n")
             wait_for_prompt(channel, expected="[edit]", timeout=5)
-
         else:
             print("        Commit check passed ✓")
-
-            # ── 6. Commit ─────────────────────────────────────────────────────
             print("    [6] Committing ...")
             channel.send("commit\n")
             out = wait_for_prompt(channel, expected="commit complete", timeout=30)
@@ -406,7 +482,7 @@ def verify_node(device: dict, node_label: str) -> None:
     client = ssh_connect(device)
     checks = [
         "cli -c 'show interfaces terse'",
-        "cli -c 'show route 0.0.0.0/0'",
+        "cli -c 'show route'",
         "cli -c 'show chassis high-availability'",
         "cli -c 'show security zones'",
     ]
@@ -426,20 +502,6 @@ def configure_node(node: dict, node_label: str) -> None:
     print(f"  Full setup — {node_label}  ({node['host']})")
     print(f"{'=' * 60}")
 
-    cmds = build_all_commands(node)
-
-    print(f"\n  Commands to be applied ({len(cmds)} total):")
-    sections = {
-        "ICL interface":            lambda c: c.startswith("set interfaces") and "ICL" in c or node["icl_interface"] in c and "description" not in c and "address" in c,
-        "MNHA chassis HA":          lambda c: "high-availability" in c,
-        "LAN interface + trust":    lambda c: node["lan_interface"] in c or "trust" in c,
-        "WAN interface + untrust":  lambda c: node["wan_interface"] in c or "untrust" in c,
-        "Default route":            lambda c: "routing-options" in c,
-        "Source NAT":               lambda c: "nat" in c,
-    }
-    for cmd in cmds:
-        print(f"    {cmd}")
-
     nat_note = "  (+ source NAT)" if node.get("enable_nat") else ""
     confirm = input(
         f"\n  Apply full config to {node_label} ({node['host']})?{nat_note} [y/N]: "
@@ -450,7 +512,7 @@ def configure_node(node: dict, node_label: str) -> None:
 
     print(f"\n  Applying configuration ...")
     try:
-        output = run_full_config(node, cmds)
+        output = run_full_config(node)
         print(f"\n  --- Raw SSH output ({node_label}) ---")
         print(textwrap.indent(output, "  "))
 
@@ -461,7 +523,7 @@ def configure_node(node: dict, node_label: str) -> None:
             or "invalid input" in ln.lower()
         ]
         if error_lines:
-            print(f"\n  [WARNING] Errors detected on {node_label}:")
+            print(f"\n  [WARNING] Errors on {node_label}:")
             for ln in error_lines:
                 print(f"    {ln.strip()}")
         else:
@@ -483,36 +545,39 @@ def main() -> None:
 
     env_data = load_env_file(env_file)
     print(f"  [.env] Loaded {len(env_data)} settings from '{env_file}'"
-          if env_data else f"  [.env] '{env_file}' not found — using built-in defaults")
+          if env_data else f"  [.env] '{env_file}' not found — using defaults")
 
     cfg            = merge_config(env_data)
     args           = parse_args(cfg)
     NODE_1, NODE_2 = build_node_dicts(args)
     nat_note       = "  (+ source NAT)" if args.enable_nat else ""
 
+    lan_ifaces = _csv(args.lan_ifaces)
+    wan_ifaces = _csv(args.wan_ifaces)
+
     print(f"""
-╔══════════════════════════════════════════════════════════╗
-║    Juniper SRX MNHA — Full Setup (ICL + LAN + WAN)      ║
-╚══════════════════════════════════════════════════════════╝
+╔══════════════════════════════════════════════════════════════╗
+║  Juniper SRX MNHA — Full Setup (ICL + {len(lan_ifaces)} LAN + {len(wan_ifaces)} WAN)        ║
+╚══════════════════════════════════════════════════════════════╝
 
  Node 1  :  {NODE_1['host']}
    ICL   :  {NODE_1['icl_interface']}  →  {NODE_1['icl_ip']}
-   LAN   :  {NODE_1['lan_interface']}  →  {NODE_1['lan_ip']}
-   WAN   :  {NODE_1['wan_interface']}  →  {NODE_1['wan_ip']}{nat_note}
+   LANs  :  {", ".join(f"{i}={ip}" for i, ip in zip(lan_ifaces, NODE_1['lan_ips']))}
+   WANs  :  {", ".join(f"{i}={ip}" for i, ip in zip(wan_ifaces, NODE_1['wan_ips']))}{nat_note}
 
  Node 2  :  {NODE_2['host']}
    ICL   :  {NODE_2['icl_interface']}  →  {NODE_2['icl_ip']}
-   LAN   :  {NODE_2['lan_interface']}  →  {NODE_2['lan_ip']}
-   WAN   :  {NODE_2['wan_interface']}  →  {NODE_2['wan_ip']}{nat_note}
+   LANs  :  {", ".join(f"{i}={ip}" for i, ip in zip(lan_ifaces, NODE_2['lan_ips']))}
+   WANs  :  {", ".join(f"{i}={ip}" for i, ip in zip(wan_ifaces, NODE_2['wan_ips']))}{nat_note}
 
- WAN gateway  :  {NODE_1['wan_gateway']}
+ Note: interfaces already configured on the device will be skipped.
 """)
 
     configure_node(NODE_1, "Node-1 (primary)")
     configure_node(NODE_2, "Node-2 (secondary)")
 
     if args.verify or input(
-        "\nRun verification (show interfaces/route/ha/zones) on both nodes? [y/N]: "
+        "\nRun verification (show interfaces/route/ha/zones)? [y/N]: "
     ).strip().lower() == "y":
         verify_node(NODE_1, "Node-1")
         verify_node(NODE_2, "Node-2")
