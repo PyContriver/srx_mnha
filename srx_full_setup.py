@@ -322,22 +322,13 @@ def build_all_commands(node: dict, skip_ifaces: set) -> list[str]:
             cmds.append(f"set routing-options static route {wan_subnet} next-hop {gw}")
         configured_wans.append(iface)
 
-    # ── 5. SRG (Service Redundancy Group) — register LAN and WAN interfaces ───
-    # MNHA requires interfaces to be explicitly listed as lan-interface or
-    # wan-interface inside the SRG before virtual IPs can be assigned to them.
-    # Without this, MNHA raises:
-    #   "virtual IP for interface X.0 is not a configured LAN or WAN interface"
-    srg = 1
-    for iface in configured_lans:
-        cmds.append(
-            f"set chassis high-availability service-redundancy-group {srg} "
-            f"lan-interface {iface}"
-        )
-    for iface in configured_wans:
-        cmds.append(
-            f"set chassis high-availability service-redundancy-group {srg} "
-            f"wan-interface {iface}"
-        )
+    # NOTE: SRG (Service Redundancy Group) LAN/WAN interface registration is
+    # managed through Security Director / SDSN, NOT via Junos CLI.
+    # The error "virtual IP for interface X.0 is not a configured LAN or WAN
+    # interface" means SD does not know about this interface in its topology.
+    # Fix: in Security Director → Sites → MNHA topology, mark the interfaces
+    # as LAN or WAN. The Junos trust/untrust zone assignment done above is the
+    # CLI side; SD's site topology is the management-plane side.
 
     # ── 5. Optional source NAT ────────────────────────────────────────────────
     if node.get("enable_nat"):

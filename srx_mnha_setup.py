@@ -539,16 +539,10 @@ def build_lan_commands(node: dict, skip_ifaces: set | None = None) -> list[str]:
         ]
         srg_lans.append(iface)
 
-    # ── SRG — register LAN interfaces so virtual IPs can be assigned ──────────
-    # Without this, MNHA raises:
+    # NOTE: SRG LAN/WAN interface registration is managed through Security
+    # Director / SDSN — NOT via Junos CLI. If you see:
     #   "virtual IP for interface X.0 is not a configured LAN or WAN interface"
-    srg = 1
-    for iface in srg_lans:
-        cmds.append(
-            f"set chassis high-availability service-redundancy-group {srg} "
-            f"lan-interface {iface}"
-        )
-
+    # fix it in Security Director's site/MNHA topology, not via CLI commands.
     return cmds
 
 
