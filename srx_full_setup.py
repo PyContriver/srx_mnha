@@ -290,8 +290,8 @@ def build_all_commands(node: dict, skip_ifaces: set) -> list[str]:
         zone_name = "trust"
         cmds += [
             f"set interfaces {iface} description \"LAN{idx}-NODE{node['local_id']}\"",
-            # Delete any previously set IPs before applying new one (prevents accumulation)
-            f"delete interfaces {iface} unit 0 family inet address",
+            # Delete entire family inet stanza before applying new address (prevents IP accumulation)
+            f"delete interfaces {iface} unit 0 family inet",
             f"set interfaces {iface} unit 0 family inet address {ip}",
             # Bare zone assignment only — zone-level host-inbound-traffic already
             # covers ping/ssh/https for all interfaces in the trust zone.
