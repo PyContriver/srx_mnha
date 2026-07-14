@@ -204,6 +204,13 @@ def build_all_commands(node: dict) -> list[str]:
     pid   = node["peer_id"]
 
     cmds = [
+        # ── 0. Clean slate — delete any existing chassis HA config first ──────
+        # Prevents "local-id must be different from peer-id" conflicts from
+        # leftover peer-id values committed by a previous partial run.
+        # Only removes the chassis high-availability stanza — all interface
+        # IPs, zones, and routes are untouched.
+        "delete chassis high-availability",
+
         # ── 1. ICL interface ─────────────────────────────────────────────────
         f"set interfaces {icl} description \"MNHA-ICL-to-peer\"",
         f"set interfaces {icl} unit 0 family inet address {node['icl_ip']}",
