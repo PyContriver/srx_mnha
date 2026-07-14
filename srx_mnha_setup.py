@@ -23,24 +23,20 @@ import textwrap
 # Priority order: CLI args  >  .env file  >  these defaults
 
 DEFAULTS = {
-    # Management IPs (used to SSH into each node)
+    # Management IPs
     "n1_host":       "10.0.0.1",
     "n2_host":       "10.0.0.2",
-    # ICL link IPs (/30 point-to-point between the two nodes)
+    # ICL
+    "icl_interface": "ge-0/0/0",
     "n1_icl_ip":     "10.255.255.1/30",
     "n2_icl_ip":     "10.255.255.2/30",
-    # LAN IPs (facing downstream network)
-    "n1_lan_ip":     "10.10.10.1/24",
-    "n2_lan_ip":     "10.10.10.2/24",
-    # Interfaces
-    "icl_interface": "ge-0/0/0",
-    "lan_interface": "ge-0/0/2",
+    # LAN — comma-separated lists (same format as srx_full_setup.py)
+    "lan_ifaces":    "ge-0/0/2,ge-0/0/3,ge-0/0/4,ge-0/0/5,ge-0/0/6",
+    "n1_lan_ips":    "10.30.30.1/24,10.31.31.1/24,10.32.32.1/24,10.33.33.1/24,10.34.34.1/24",
+    "n2_lan_ips":    "10.30.30.2/24,10.31.31.2/24,10.32.32.2/24,10.33.33.2/24,10.34.34.2/24",
     # SSH
     "username":      "admin",
     "port":          22,
-    # MNHA timers
-    "hb_interval":   1000,
-    "hb_threshold":  3,
 }
 
 # ─── .ENV FILE LOADER ─────────────────────────────────────────────────────────
@@ -88,56 +84,21 @@ def load_env_file(path: str) -> dict:
     return env
 
 
-def merge_config(env: dict) -> dict:
-    """
-    Merge .env values on top of built-in DEFAULTS.
-    .env keys map directly to DEFAULTS keys (lowercased, underscored).
-    Also handles the SSH_PASSWORD, SSH_PORT aliases used in the .env.
-    """
-    merged = dict(DEFAULTS)
-    key_map = {
-        # .env key         → DEFAULTS key
-        "n1_host":         "n1_host",
-        "n2_host":         "n2_host",
-        "n1_icl_ip":       "n1_icl_ip",
-        "n2_icl_ip":       "n2_icl_ip",
-        "n1_lan_ip":       "n1_lan_ip",
-        "n2_lan_ip":       "n2_lan_ip",
-        "n1_icl_iface":    "icl_interface",
-        "n2_icl_iface":    "icl_interface",   # shared default
-        "n1_lan_iface":    "lan_interface",
-        "n2_lan_iface":    "lan_interface",
-        "n1_user":         "username",
-        "n2_user":         "username",
-        "ssh_port":        "port",
-        "ssh_password":    "password",
-        "hb_interval":     "hb_interval",
-        "hb_threshold":    "hb_threshold",
-    }
-    # Per-node iface overrides stored separately
-    if "n1_icl_iface" in env:
-        merged["n1_icl_iface"] = env["n1_icl_iface"]
-    if "n2_icl_iface" in env:
-        merged["n2_icl_iface"] = env["n2_icl_iface"]
-    if "n1_lan_iface" in env:
-        merged["n1_lan_iface"] = env["n1_lan_iface"]
-    if "n2_lan_iface" in env:
-        merged["n2_lan_iface"] = env["n2_lan_iface"]
-    if "n1_user" in env:
-        merged["n1_user"] = env["n1_user"]
-    if "n2_user" in env:
-        merged["n2_user"] = env["n2_user"]
+def _csv(val: str) -> list[str]:
+    return [v.strip() for v in val.split(",") if v.strip()]
 
-    for env_key, default_key in key_map.items():
-        if env_key in env:
-            val = env[env_key]
-            # cast numerics
-            if default_key in ("port", "hb_interval", "hb_threshold"):
-                try:
-                    val = int(val)
-                except ValueError:
-                    pass
-            merged[default_key] = val
+
+def merge_config(env: dict) -> dict:
+    merged = dict(DEFAULTS)
+    for key in ("n1_host", "n2_host", "n1_icl_ip", "n2_icl_ip",
+                "lan_ifaces", "n1_lan_ips", "n2_lan_ips"):
+        if key in env:
+            merged[key] = env[key]
+    for attr in ("n1_icl_iface", "n2_icl_iface", "n1_user", "n2_user"):
+        if attr in env:
+            merged[attr] = env[attr]
+    if "ssh_port"     in env: merged["port"]     = int(env["ssh_port"])
+    if "ssh_password" in env: merged["password"] = env["ssh_password"]
     return merged
 
 
@@ -171,72 +132,66 @@ def parse_args(cfg: dict) -> argparse.Namespace:
 
     # ── Node 1 ───────────────────────────────────────────────────────────────
     g1 = p.add_argument_group("Node 1 (primary)")
-    g1.add_argument("--n1-host",      default=cfg.get("n1_host"),      metavar="IP")
-    g1.add_argument("--n1-user",      default=cfg.get("n1_user",
-                                       cfg["username"]),                metavar="USER")
-    g1.add_argument("--n1-icl-ip",    default=cfg.get("n1_icl_ip"),    metavar="A.B.C.D/30")
-    g1.add_argument("--n1-lan-ip",    default=cfg.get("n1_lan_ip"),    metavar="A.B.C.D/24")
-    g1.add_argument("--n1-icl-iface", default=cfg.get("n1_icl_iface",
-                                       cfg["icl_interface"]),           metavar="IFACE")
-    g1.add_argument("--n1-lan-iface", default=cfg.get("n1_lan_iface",
-                                       cfg["lan_interface"]),           metavar="IFACE")
+    g1.add_argument("--n1-host",      default=cfg.get("n1_host"),   metavar="IP")
+    g1.add_argument("--n1-user",      default=cfg.get("n1_user", cfg["username"]))
+    g1.add_argument("--n1-icl-ip",    default=cfg.get("n1_icl_ip"), metavar="A.B.C.D/30")
+    g1.add_argument("--n1-icl-iface", default=cfg.get("n1_icl_iface", cfg["icl_interface"]))
+    g1.add_argument("--n1-lan-ips",   default=cfg.get("n1_lan_ips"),
+                    help="Comma-separated LAN IPs for node 1")
 
     # ── Node 2 ───────────────────────────────────────────────────────────────
     g2 = p.add_argument_group("Node 2 (secondary)")
-    g2.add_argument("--n2-host",      default=cfg.get("n2_host"),      metavar="IP")
-    g2.add_argument("--n2-user",      default=cfg.get("n2_user",
-                                       cfg["username"]),                metavar="USER")
-    g2.add_argument("--n2-icl-ip",    default=cfg.get("n2_icl_ip"),    metavar="A.B.C.D/30")
-    g2.add_argument("--n2-lan-ip",    default=cfg.get("n2_lan_ip"),    metavar="A.B.C.D/24")
-    g2.add_argument("--n2-icl-iface", default=cfg.get("n2_icl_iface",
-                                       cfg["icl_interface"]),           metavar="IFACE")
-    g2.add_argument("--n2-lan-iface", default=cfg.get("n2_lan_iface",
-                                       cfg["lan_interface"]),           metavar="IFACE")
+    g2.add_argument("--n2-host",      default=cfg.get("n2_host"),   metavar="IP")
+    g2.add_argument("--n2-user",      default=cfg.get("n2_user", cfg["username"]))
+    g2.add_argument("--n2-icl-ip",    default=cfg.get("n2_icl_ip"), metavar="A.B.C.D/30")
+    g2.add_argument("--n2-icl-iface", default=cfg.get("n2_icl_iface", cfg["icl_interface"]))
+    g2.add_argument("--n2-lan-ips",   default=cfg.get("n2_lan_ips"),
+                    help="Comma-separated LAN IPs for node 2")
 
     # ── Shared ────────────────────────────────────────────────────────────────
     gs = p.add_argument_group("Shared options")
-    gs.add_argument("--port",     type=int, default=cfg["port"])
-    gs.add_argument("--password", default=cfg.get("password"),
+    gs.add_argument("--lan-ifaces", default=cfg.get("lan_ifaces"),
+                    help="Comma-separated LAN interface names (same on both nodes)")
+    gs.add_argument("--port",       type=int, default=cfg["port"])
+    gs.add_argument("--password",   default=cfg.get("password"),
                     help="SSH password. Omit to be prompted securely.")
-    gs.add_argument("--verify",   action="store_true",
+    gs.add_argument("--verify",     action="store_true",
                     help="Run 'show chassis high-availability' after configuring")
 
     return p.parse_args()
 
 
 def build_node_dicts(args: argparse.Namespace) -> tuple[dict, dict]:
-    """Build NODE_1 and NODE_2 dicts from resolved config."""
-
-    # Prompt for password securely if not in args or .env
+    """Build NODE_1 and NODE_2 dicts — supports multiple LAN interfaces."""
     password = args.password
     if not password:
         password = getpass.getpass("SSH password (used for both nodes): ")
 
+    lan_ifaces = _csv(args.lan_ifaces)
+
     node1 = {
-        "host":            args.n1_host,
-        "username":        args.n1_user,
-        "password":        password,
-        "port":            args.port,
-        "local_id":        1,
-        "peer_id":         2,
-        "icl_interface":   args.n1_icl_iface,
-        "icl_ip":          args.n1_icl_ip,
-        "lan_interface":   args.n1_lan_iface,
-        "lan_ip":          args.n1_lan_ip,
-        "lan_description": "LAN-NODE1",
+        "host":          args.n1_host,
+        "username":      args.n1_user,
+        "password":      password,
+        "port":          args.port,
+        "local_id":      1,
+        "peer_id":       2,
+        "icl_interface": args.n1_icl_iface,
+        "icl_ip":        args.n1_icl_ip,
+        "lan_ifaces":    lan_ifaces,
+        "lan_ips":       _csv(args.n1_lan_ips),
     }
     node2 = {
-        "host":            args.n2_host,
-        "username":        args.n2_user,
-        "password":        password,
-        "port":            args.port,
-        "local_id":        2,
-        "peer_id":         1,
-        "icl_interface":   args.n2_icl_iface,
-        "icl_ip":          args.n2_icl_ip,
-        "lan_interface":   args.n2_lan_iface,
-        "lan_ip":          args.n2_lan_ip,
-        "lan_description": "LAN-NODE2",
+        "host":          args.n2_host,
+        "username":      args.n2_user,
+        "password":      password,
+        "port":          args.port,
+        "local_id":      2,
+        "peer_id":       1,
+        "icl_interface": args.n2_icl_iface,
+        "icl_ip":        args.n2_icl_ip,
+        "lan_ifaces":    lan_ifaces,
+        "lan_ips":       _csv(args.n2_lan_ips),
     }
     return node1, node2
 
@@ -665,26 +620,22 @@ def main() -> None:
     NODE_1["peer_icl_ip"] = NODE_2["icl_ip"].split("/")[0]
     NODE_2["peer_icl_ip"] = NODE_1["icl_ip"].split("/")[0]
 
-    print("""
+    lan_ifaces = NODE_1["lan_ifaces"]
+    print(f"""
 ╔══════════════════════════════════════════════════════════╗
 ║    Juniper SRX MNHA Setup — ICL + LAN Configuration     ║
 ╚══════════════════════════════════════════════════════════╝
 
- Node 1  :  {} (local-id {})
- Node 2  :  {} (local-id {})
+ Node 1  :  {NODE_1['host']}  (local-id {NODE_1['local_id']})
+   ICL   :  {NODE_1['icl_interface']}  →  {NODE_1['icl_ip']}
+   LANs  :  {", ".join(f"{i}={ip}" for i, ip in zip(lan_ifaces, NODE_1['lan_ips']))}
 
- ICL node1  : {} → {}
- ICL node2  : {} → {}
- LAN node1  : {} → {}
- LAN node2  : {} → {}
-""".format(
-        NODE_1["host"], NODE_1["local_id"],
-        NODE_2["host"], NODE_2["local_id"],
-        NODE_1["icl_interface"], NODE_1["icl_ip"],
-        NODE_2["icl_interface"], NODE_2["icl_ip"],
-        NODE_1["lan_interface"], NODE_1["lan_ip"],
-        NODE_2["lan_interface"], NODE_2["lan_ip"],
-    ))
+ Node 2  :  {NODE_2['host']}  (local-id {NODE_2['local_id']})
+   ICL   :  {NODE_2['icl_interface']}  →  {NODE_2['icl_ip']}
+   LANs  :  {", ".join(f"{i}={ip}" for i, ip in zip(lan_ifaces, NODE_2['lan_ips']))}
+
+ Note: interfaces already configured on the device will be skipped.
+""")
 
     # Configure both nodes
     for node, label in [(NODE_1, "Node-1 (primary)"), (NODE_2, "Node-2 (secondary)")]:
