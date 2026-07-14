@@ -395,73 +395,85 @@ def run_full_config(device: dict) -> str:
 
     # ── 4. Push all commands ──────────────────────────────────────────────────
     print(f"    [4] Pushing {len(config_commands)} commands ...")
-    errors_found = False
-    for cmd in config_commands:
-        channel.send(cmd + "\n")
-        out = wait_for_prompt(channel, expected="[edit]", timeout=5)
-        full_output += out
-        for line in out.splitlines():
-            if any(kw in line.lower() for kw in ("syntax error", "invalid", "error:")):
-                print(f"        [!] {line.strip()}")
-                errors_found = True
+    try:
+        for cmd in config_commands:
+            channel.send(cmd + "\n")
+            out = wait_for_prompt(channel, expected="[edit]", timeout=8)
+            full_output += out
+            for line in out.splitlines():
+                # Log syntax errors immediately but do NOT abort — let commit
+                # check be the authoritative validator instead of text scanning
+                if any(kw in line.lower() for kw in ("syntax error", "invalid")):
+                    print(f"        [!] {line.strip()}")
 
-    # ── 5. Commit check ───────────────────────────────────────────────────────
-    if errors_found:
-        print("\n    [5] SKIPPING commit — errors in commands above.")
-        channel.send("rollback 0\n")
-        wait_for_prompt(channel, expected="[edit]", timeout=5)
-        print(f"        Rolled back. Restore: load override {checkpoint_file} → commit")
-    else:
+        # ── 5. Commit check (always run — Junos validates the full config) ────
         print("    [5] Running commit check ...")
         channel.send("commit check\n")
-        out = wait_for_prompt(channel, expected="[edit]", timeout=20)
+        out = wait_for_prompt(channel, expected="[edit]", timeout=25)
         full_output += out
 
-        check_ok  = "configuration check succeeds" in out.lower()
-        check_err = "error" in out.lower()
+        check_ok = "configuration check succeeds" in out.lower()
 
-        if check_err or not check_ok:
-            print("        [ERROR] Commit check failed — output:")
+        if not check_ok:
+            print("        [ERROR] Commit check failed — full output:")
             print("        " + "─" * 52)
             for line in out.splitlines():
                 if line.strip():
                     print(f"          {line}")
             print("        " + "─" * 52)
+            print("        Running rollback 0 ...")
             channel.send("rollback 0\n")
-            wait_for_prompt(channel, expected="[edit]", timeout=5)
+            wait_for_prompt(channel, expected="[edit]", timeout=10)
+            print(f"        Rolled back. Restore: load override {checkpoint_file} → commit")
         else:
             print("        Commit check passed ✓")
             print("    [6] Committing ...")
             channel.send("commit\n")
-            out = wait_for_prompt(channel, expected="commit complete", timeout=30)
+            out = wait_for_prompt(channel, expected="commit complete", timeout=45)
             full_output += out
 
             if "commit complete" in out.lower():
                 print("        Commit complete ✓  — full config is live")
                 print(f"        Checkpoint: {checkpoint_file}")
-            elif "error" in out.lower():
-                print("        [ERROR] Commit failed — restoring checkpoint ...")
-                channel.send(f"load override {checkpoint_file}\n")
-                wait_for_prompt(channel, expected="[edit]", timeout=15)
-                channel.send("commit\n")
-                out2 = wait_for_prompt(channel, expected="commit complete", timeout=30)
-                full_output += out2
-                print("        Restored checkpoint ✓" if "commit complete" in out2.lower()
-                      else "        [WARNING] Restore unclear — check: show system commit")
             else:
-                out2 = wait_for_prompt(channel, expected="[edit]", timeout=15)
+                # Drain any remaining output and check again
+                time.sleep(2)
+                out2 = wait_for_prompt(channel, expected="[edit]", timeout=10)
                 full_output += out2
-                print("        Commit complete ✓" if "commit complete" in (out + out2).lower()
-                      else "        [WARNING] Commit status unclear — run: show system commit")
+                if "commit complete" in (out + out2).lower():
+                    print("        Commit complete ✓")
+                elif "error" in (out + out2).lower():
+                    print("        [ERROR] Commit failed — restoring checkpoint ...")
+                    channel.send(f"load override {checkpoint_file}\n")
+                    wait_for_prompt(channel, expected="[edit]", timeout=15)
+                    channel.send("commit\n")
+                    out3 = wait_for_prompt(channel, expected="commit complete", timeout=30)
+                    full_output += out3
+                    print("        Restored checkpoint ✓" if "commit complete" in out3.lower()
+                          else "        [WARNING] Restore unclear — run: show system commit")
+                else:
+                    print("        [WARNING] Commit status unclear — run: show system commit")
 
-    # ── 7. Exit ───────────────────────────────────────────────────────────────
-    print("    [7] Exiting configuration mode ...")
-    channel.send("exit\n")
-    wait_for_prompt(channel, expected=">", timeout=5)
-    channel.send("exit\n")
-    time.sleep(1)
-    channel.close()
-    client.close()
+    finally:
+        # ── 7. Always exit config mode — even if an exception occurred ────────
+        try:
+            print("    [7] Exiting configuration mode ...")
+            channel.send("exit\n")
+            time.sleep(1)        # drain buffer before checking prompt
+            wait_for_prompt(channel, expected=">", timeout=8)
+            channel.send("exit\n")
+            time.sleep(1)
+        except Exception:
+            pass                 # best-effort exit; don't let cleanup kill the script
+        try:
+            channel.close()
+        except Exception:
+            pass
+        try:
+            client.close()
+        except Exception:
+            pass
+
     return full_output
 
 
@@ -498,7 +510,7 @@ def configure_node(node: dict, node_label: str) -> None:
         f"\n  Apply full config to {node_label} ({node['host']})?{nat_note} [y/N]: "
     ).strip().lower()
     if confirm != "y":
-        print(f"  Skipped {node_label}.")
+        print(f"  Skipped {node_label}. Moving to next node ...\n")
         return
 
     print(f"\n  Applying configuration ...")
@@ -565,8 +577,8 @@ def main() -> None:
  Note: interfaces already configured on the device will be skipped.
 """)
 
-    configure_node(NODE_1, "Node-1 (primary)")
-    configure_node(NODE_2, "Node-2 (secondary)")
+    for node, label in [(NODE_1, "Node-1 (primary)"), (NODE_2, "Node-2 (secondary)")]:
+        configure_node(node, label)
 
     if args.verify or input(
         "\nRun verification (show interfaces/route/ha/zones)? [y/N]: "

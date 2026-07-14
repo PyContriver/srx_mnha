@@ -447,16 +447,24 @@ def run_junos_config(device: dict, config_commands: list[str]) -> str:
                     print("        [WARNING] Commit status unclear — verify on device with:")
                     print("          show system commit")
 
-    # ── Step 6: exit configuration mode, then CLI ────────────────────────────
-    print("    [7] Exiting configuration mode ...")
-    channel.send("exit\n")
-    wait_for_prompt(channel, expected=">", timeout=5)
-
-    channel.send("exit\n")
-    time.sleep(1)
-
-    channel.close()
-    client.close()
+    # ── Step 6: always exit config mode — even after errors ─────────────────
+    try:
+        print("    [7] Exiting configuration mode ...")
+        channel.send("exit\n")
+        time.sleep(1)
+        wait_for_prompt(channel, expected=">", timeout=8)
+        channel.send("exit\n")
+        time.sleep(1)
+    except Exception:
+        pass
+    try:
+        channel.close()
+    except Exception:
+        pass
+    try:
+        client.close()
+    except Exception:
+        pass
     return full_output
 
 
@@ -555,7 +563,13 @@ def configure_node(node: dict, node_label: str) -> None:
     print(f"  Configuring {node_label}  ({node['host']})")
     print(f"{'=' * 60}")
 
-    # Pre-check: detect already-configured interfaces
+    # ── Ask first — no SSH until the user confirms ────────────────────────────
+    confirm = input(f"\n  Apply to {node_label} ({node['host']})? [y/N]: ").strip().lower()
+    if confirm != "y":
+        print(f"  Skipped {node_label}. Moving to next node ...\n")
+        return
+
+    # ── Pre-check: detect already-configured interfaces (after confirmation) ──
     print(f"\n  Pre-checking existing interfaces on {node_label} ...")
     try:
         _client = __import__("paramiko").SSHClient()
@@ -581,11 +595,6 @@ def configure_node(node: dict, node_label: str) -> None:
     print(f"\n  Commands to be applied on {node_label}:")
     for cmd in all_cmds:
         print(f"    {cmd}")
-
-    confirm = input(f"\n  Apply to {node_label} ({node['host']})? [y/N]: ").strip().lower()
-    if confirm != "y":
-        print(f"  Skipped {node_label}.")
-        return
 
     print(f"\n  Applying configuration to {node_label} ...")
     try:
@@ -678,8 +687,8 @@ def main() -> None:
     ))
 
     # Configure both nodes
-    configure_node(NODE_1, "Node-1 (primary)")
-    configure_node(NODE_2, "Node-2 (secondary)")
+    for node, label in [(NODE_1, "Node-1 (primary)"), (NODE_2, "Node-2 (secondary)")]:
+        configure_node(node, label)
 
     # Optional post-config verification
     if args.verify or input(
