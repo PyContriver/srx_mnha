@@ -291,11 +291,9 @@ def build_all_commands(node: dict, skip_ifaces: set) -> list[str]:
         cmds += [
             f"set interfaces {iface} description \"LAN{idx}-NODE{node['local_id']}\"",
             f"set interfaces {iface} unit 0 family inet address {ip}",
+            # Bare zone assignment only — zone-level host-inbound-traffic already
+            # covers ping/ssh/https for all interfaces in the trust zone.
             f"set security zones security-zone {zone_name} interfaces {iface}.0",
-            f"set security zones security-zone {zone_name} interfaces {iface}.0 "
-            f"host-inbound-traffic system-services ping",
-            f"set security zones security-zone {zone_name} interfaces {iface}.0 "
-            f"host-inbound-traffic system-services ssh",
         ]
         configured_lans.append(iface)
 

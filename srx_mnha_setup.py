@@ -494,11 +494,10 @@ def build_lan_commands(node: dict, skip_ifaces: set | None = None) -> list[str]:
         cmds += [
             f"set interfaces {iface} description \"LAN{idx}-NODE{node['local_id']}\"",
             f"set interfaces {iface} unit 0 family inet address {ip}",
+            # Bare zone assignment — same as ge-0/0/2.0 that SD already recognises.
+            # Zone-level host-inbound-traffic (ping/ssh/https) already covers all
+            # interfaces in the trust zone, so per-interface rules are redundant.
             f"set security zones security-zone trust interfaces {iface}.0",
-            f"set security zones security-zone trust interfaces {iface}.0 "
-            f"host-inbound-traffic system-services ping",
-            f"set security zones security-zone trust interfaces {iface}.0 "
-            f"host-inbound-traffic system-services ssh",
         ]
         srg_lans.append(iface)
 
