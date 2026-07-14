@@ -521,8 +521,9 @@ def configure_node(node: dict, node_label: str) -> None:
             print(f"\n  [OK] Full configuration committed on {node_label}.")
 
     except Exception as exc:
-        print(f"\n  [ERROR] {node_label}: {exc}", file=sys.stderr)
-        raise
+        print(f"\n  [ERROR] {node_label} failed: {exc}", file=sys.stderr)
+        print(f"  Skipping {node_label} — continuing to next node ...")
+        # Do NOT re-raise — allow the script to continue to the next node
 
 
 # ─── MAIN ────────────────────────────────────────────────────────────────────

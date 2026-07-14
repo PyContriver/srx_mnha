@@ -385,7 +385,8 @@ def configure_wan_node(node: dict, node_label: str) -> None:
 
     except Exception as exc:
         print(f"\n  [ERROR] Failed to configure {node_label}: {exc}", file=sys.stderr)
-        raise
+        print(f"  Skipping {node_label} — continuing to next node ...")
+        # Do NOT re-raise — allow the script to continue to the next node
 
 
 # ─── MAIN ─────────────────────────────────────────────────────────────────────
