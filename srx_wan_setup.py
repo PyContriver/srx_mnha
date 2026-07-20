@@ -426,7 +426,8 @@ def main() -> None:
     args = parse_args(cfg)
     NODE_1, NODE_2 = build_node_dicts(args)
 
-    nat_note = "  (+ source NAT)" if args.enable_nat else ""
+    nat_note   = "  (+ source NAT)" if args.enable_nat else ""
+    wan_ifaces = NODE_1["wan_ifaces"]
 
     print(f"""
 ╔══════════════════════════════════════════════════════════╗
@@ -434,12 +435,12 @@ def main() -> None:
 ╚══════════════════════════════════════════════════════════╝
 
  Node 1  :  {NODE_1['host']}
-   WAN   :  {NODE_1['wan_interface']}  →  {NODE_1['wan_ip']}{nat_note}
+   WANs  :  {", ".join(f"{i}={ip}" for i, ip in zip(wan_ifaces, NODE_1['wan_ips']))}{nat_note}
 
  Node 2  :  {NODE_2['host']}
-   WAN   :  {NODE_2['wan_interface']}  →  {NODE_2['wan_ip']}{nat_note}
+   WANs  :  {", ".join(f"{i}={ip}" for i, ip in zip(wan_ifaces, NODE_2['wan_ips']))}{nat_note}
 
- Default gateway  :  {NODE_1['wan_gateway']}
+ Gateways  :  {", ".join(NODE_1['wan_gateways'])}
 """)
 
     configure_wan_node(NODE_1, "Node-1 (primary)")
