@@ -299,8 +299,10 @@ def build_all_commands(node: dict, skip_ifaces: set) -> list[str]:
         ]
         configured_lans.append(iface)
 
-    # ── 4. WAN interfaces (5 × skip-aware) + static routes ───────────────────
-    configured_wans = []   # track which WANs we actually configure
+    # ── 4. WAN interfaces + static routes ────────────────────────────────────
+    # Before configuring as WAN, clean up any existing LAN (trust zone) config
+    # on these interfaces — in case they were previously used as LAN interfaces.
+    configured_wans = []
     for idx, (iface, ip, gw) in enumerate(
             zip(node["wan_ifaces"], node["wan_ips"], node["wan_gateways"]), 1):
         if iface in skip_ifaces:
@@ -310,7 +312,12 @@ def build_all_commands(node: dict, skip_ifaces: set) -> list[str]:
         zone_name = "untrust"
         cmds += [
             f"set interfaces {iface} description \"WAN{idx}-NODE{node['local_id']}\"",
+            # Remove any existing IP to prevent accumulation
+            f"delete interfaces {iface} unit 0 family inet",
             f"set interfaces {iface} unit 0 family inet address {ip}",
+            # Remove from trust zone if it was previously a LAN interface
+            f"delete security zones security-zone trust interfaces {iface}.0",
+            # Add to untrust (WAN) zone
             f"set security zones security-zone {zone_name} interfaces {iface}.0",
             f"set security zones security-zone {zone_name} interfaces {iface}.0 "
             f"host-inbound-traffic system-services ping",

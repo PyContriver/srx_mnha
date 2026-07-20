@@ -24,17 +24,16 @@ import textwrap
 
 DEFAULTS = {
     # Management IPs (SSH targets)
-    "n1_host":       "10.0.0.1",
-    "n2_host":       "10.0.0.2",
-    # WAN
-    "n1_wan_iface":  "ge-0/0/1",
-    "n2_wan_iface":  "ge-0/0/1",
-    "n1_wan_ip":     "10.20.20.1/24",
-    "n2_wan_ip":     "10.20.20.2/24",
-    "wan_gateway":   "10.20.20.254",
+    "n1_host":      "10.0.0.1",
+    "n2_host":      "10.0.0.2",
+    # WAN — comma-separated lists (same format as srx_full_setup.py)
+    "wan_ifaces":   "ge-0/0/1,ge-0/0/5,ge-0/0/6",
+    "n1_wan_ips":   "10.20.20.1/24,10.21.21.1/24,10.22.22.1/24",
+    "n2_wan_ips":   "10.20.20.2/24,10.21.21.2/24,10.22.22.2/24",
+    "wan_gateways": "10.20.20.254,10.21.21.254,10.22.22.254",
     # SSH
-    "username":      "admin",
-    "port":          22,
+    "username":     "admin",
+    "port":         22,
 }
 
 # ─── .ENV LOADER (same logic as srx_mnha_setup.py) ───────────────────────────
@@ -59,26 +58,21 @@ def load_env_file(path: str) -> dict:
     return env
 
 
+def _csv(val: str) -> list[str]:
+    return [v.strip() for v in val.split(",") if v.strip()]
+
+
 def merge_config(env: dict) -> dict:
-    """Merge .env values on top of built-in DEFAULTS."""
     merged = dict(DEFAULTS)
-    for key in (
-        "n1_host", "n2_host",
-        "n1_wan_iface", "n2_wan_iface",
-        "n1_wan_ip", "n2_wan_ip",
-        "wan_gateway",
-        "n1_user", "n2_user",
-    ):
+    for key in ("n1_host", "n2_host", "wan_ifaces",
+                "n1_wan_ips", "n2_wan_ips", "wan_gateways"):
         if key in env:
             merged[key] = env[key]
-    if "ssh_port"     in env:
-        merged["port"]     = int(env["ssh_port"])
-    if "ssh_password" in env:
-        merged["password"] = env["ssh_password"]
-    if "n1_user"      in env:
-        merged["n1_user"]  = env["n1_user"]
-    if "n2_user"      in env:
-        merged["n2_user"]  = env["n2_user"]
+    for attr in ("n1_user", "n2_user"):
+        if attr in env:
+            merged[attr] = env[attr]
+    if "ssh_port"     in env: merged["port"]     = int(env["ssh_port"])
+    if "ssh_password" in env: merged["password"] = env["ssh_password"]
     return merged
 
 
@@ -94,20 +88,22 @@ def parse_args(cfg: dict) -> argparse.Namespace:
                    help=".env file to load settings from")
 
     g1 = p.add_argument_group("Node 1 (primary)")
-    g1.add_argument("--n1-host",      default=cfg.get("n1_host"))
-    g1.add_argument("--n1-user",      default=cfg.get("n1_user", cfg["username"]))
-    g1.add_argument("--n1-wan-iface", default=cfg.get("n1_wan_iface"),  metavar="IFACE")
-    g1.add_argument("--n1-wan-ip",    default=cfg.get("n1_wan_ip"),     metavar="A.B.C.D/X")
+    g1.add_argument("--n1-host",    default=cfg.get("n1_host"))
+    g1.add_argument("--n1-user",    default=cfg.get("n1_user", cfg["username"]))
+    g1.add_argument("--n1-wan-ips", default=cfg.get("n1_wan_ips"),
+                    help="Comma-separated WAN IPs for node 1")
 
     g2 = p.add_argument_group("Node 2 (secondary)")
-    g2.add_argument("--n2-host",      default=cfg.get("n2_host"))
-    g2.add_argument("--n2-user",      default=cfg.get("n2_user", cfg["username"]))
-    g2.add_argument("--n2-wan-iface", default=cfg.get("n2_wan_iface"),  metavar="IFACE")
-    g2.add_argument("--n2-wan-ip",    default=cfg.get("n2_wan_ip"),     metavar="A.B.C.D/X")
+    g2.add_argument("--n2-host",    default=cfg.get("n2_host"))
+    g2.add_argument("--n2-user",    default=cfg.get("n2_user", cfg["username"]))
+    g2.add_argument("--n2-wan-ips", default=cfg.get("n2_wan_ips"),
+                    help="Comma-separated WAN IPs for node 2")
 
     gs = p.add_argument_group("Shared options")
-    gs.add_argument("--wan-gateway",  default=cfg.get("wan_gateway"),   metavar="IP",
-                    help="Default gateway IP (upstream router) — same for both nodes")
+    gs.add_argument("--wan-ifaces",   default=cfg.get("wan_ifaces"),
+                    help="Comma-separated WAN interface names (same on both nodes)")
+    gs.add_argument("--wan-gateways", default=cfg.get("wan_gateways"),
+                    help="Comma-separated gateways, one per WAN interface")
     gs.add_argument("--port",         type=int, default=cfg["port"])
     gs.add_argument("--password",     default=cfg.get("password"),
                     help="SSH password. Omit to be prompted securely.")
@@ -124,15 +120,19 @@ def build_node_dicts(args: argparse.Namespace) -> tuple[dict, dict]:
     if not password:
         password = getpass.getpass("SSH password (used for both nodes): ")
 
+    wan_ifaces   = _csv(args.wan_ifaces)
+    wan_gateways = _csv(args.wan_gateways)
+    while len(wan_gateways) < len(wan_ifaces):
+        wan_gateways.append(wan_gateways[-1] if wan_gateways else "0.0.0.0")
+
     node1 = {
         "host":          args.n1_host,
         "username":      args.n1_user,
         "password":      password,
         "port":          args.port,
-        "wan_interface": args.n1_wan_iface,
-        "wan_ip":        args.n1_wan_ip,
-        "wan_gateway":   args.wan_gateway,
-        "wan_desc":      "WAN-NODE1",
+        "wan_ifaces":    wan_ifaces,
+        "wan_ips":       _csv(args.n1_wan_ips),
+        "wan_gateways":  wan_gateways,
         "enable_nat":    args.enable_nat,
     }
     node2 = {
@@ -140,10 +140,9 @@ def build_node_dicts(args: argparse.Namespace) -> tuple[dict, dict]:
         "username":      args.n2_user,
         "password":      password,
         "port":          args.port,
-        "wan_interface": args.n2_wan_iface,
-        "wan_ip":        args.n2_wan_ip,
-        "wan_gateway":   args.wan_gateway,
-        "wan_desc":      "WAN-NODE2",
+        "wan_ifaces":    wan_ifaces,
+        "wan_ips":       _csv(args.n2_wan_ips),
+        "wan_gateways":  wan_gateways,
         "enable_nat":    args.enable_nat,
     }
     return node1, node2
@@ -191,25 +190,40 @@ def wait_for_prompt(channel: paramiko.Channel,
 
 
 def build_wan_commands(node: dict) -> list[str]:
-    iface   = node["wan_interface"]
-    wan_ip  = node["wan_ip"]
-    gateway = node["wan_gateway"]
-    cmds = [
-        # ── WAN physical interface ────────────────────────────────────────────
-        f"set interfaces {iface} description \"{node['wan_desc']}\"",
-        f"set interfaces {iface} unit 0 family inet address {wan_ip}",
+    """
+    Build WAN commands for all configured WAN interfaces.
+    For each interface:
+      - Removes any existing IP (prevents accumulation)
+      - Removes from trust zone if it was previously a LAN interface
+      - Assigns to untrust zone with WAN IP and gateway route
+    """
+    cmds = []
 
-        # ── Security zone — untrust ───────────────────────────────────────────
-        f"set security zones security-zone untrust interfaces {iface}.0",
-        # Allow ping from WAN (for ISP reachability checks) — remove if not needed
-        f"set security zones security-zone untrust interfaces {iface}.0 "
-        f"host-inbound-traffic system-services ping",
+    for idx, (iface, ip, gw) in enumerate(
+            zip(node["wan_ifaces"], node["wan_ips"], node["wan_gateways"]), 1):
 
-        # ── Default static route → WAN gateway ───────────────────────────────
-        f"set routing-options static route 0.0.0.0/0 next-hop {gateway}",
-    ]
+        node_id = node.get("local_id", "")
+        cmds += [
+            f"set interfaces {iface} description \"WAN{idx}-NODE{node_id}\"",
+            # Remove any existing IP to prevent accumulation
+            f"delete interfaces {iface} unit 0 family inet",
+            f"set interfaces {iface} unit 0 family inet address {ip}",
+            # Remove from trust (LAN) zone if previously configured as LAN
+            f"delete security zones security-zone trust interfaces {iface}.0",
+            # Add to untrust (WAN) zone
+            f"set security zones security-zone untrust interfaces {iface}.0",
+            f"set security zones security-zone untrust interfaces {iface}.0 "
+            f"host-inbound-traffic system-services ping",
+        ]
+        if idx == 1:
+            # Primary WAN gets the default route
+            cmds.append(f"set routing-options static route 0.0.0.0/0 next-hop {gw}")
+        else:
+            # Additional WANs get a subnet-specific route
+            wan_subnet = ip.rsplit(".", 1)[0] + ".0/" + ip.split("/")[1]
+            cmds.append(f"set routing-options static route {wan_subnet} next-hop {gw}")
 
-    # ── Optional source NAT (trust → untrust masquerade) ─────────────────────
+    # ── Optional source NAT ───────────────────────────────────────────────────
     if node.get("enable_nat"):
         cmds += [
             "set security nat source rule-set TRUST-TO-WAN from zone trust",
@@ -335,13 +349,16 @@ def run_wan_config(device: dict, config_commands: list[str]) -> str:
 def verify_wan(device: dict, node_label: str) -> None:
     print(f"\n  Verifying WAN on {node_label} ({device['host']}) ...")
     client = ssh_connect(device)
-    for cmd in [
-        f"cli -c 'show interfaces {device['wan_interface']} terse'",
-        "cli -c 'show route 0.0.0.0/0'",
-    ]:
+    # Show terse for each WAN interface
+    for iface in device.get("wan_ifaces", []):
+        cmd = f"cli -c 'show interfaces {iface} terse'"
         _, stdout, _ = client.exec_command(cmd, timeout=10)
-        print(f"\n  --- {cmd.split('-c')[1].strip()} ---")
+        print(f"\n  --- show interfaces {iface} terse ---")
         print(textwrap.indent(stdout.read().decode(), "  "))
+    # Show default route
+    _, stdout, _ = client.exec_command("cli -c 'show route 0.0.0.0/0'", timeout=10)
+    print("\n  --- show route 0.0.0.0/0 ---")
+    print(textwrap.indent(stdout.read().decode(), "  "))
     client.close()
 
 
@@ -361,7 +378,7 @@ def configure_wan_node(node: dict, node_label: str) -> None:
 
     confirm = input(f"\n  Apply to {node_label} ({node['host']})? [y/N]: ").strip().lower()
     if confirm != "y":
-        print(f"  Skipped {node_label}.")
+        print(f"  Skipped {node_label}. Moving to next node ...\n")
         return
 
     print(f"\n  Applying WAN configuration to {node_label} ...")
